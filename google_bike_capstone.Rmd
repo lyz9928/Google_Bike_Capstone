@@ -1,0 +1,253 @@
+---
+title: "Google Cyclistic Capstone"
+output: html_document
+date: "2023-09-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+```
+
+# 1. Problem statement
+
+Cyclistic is a Chicago based bike-shar company who offers products to be inclusive to handicapped people. The future success of this company depends on maximazing the number of annual members and this analysis aims to find major difference between annual members and casual riders.
+
+# 2. Data source
+
+The data can be obtained here <https://divvy-tripdata.s3.amazonaws.com/index.html>. This dataset contains bike usage records from January to December in 2022. It documented the ride ID, membership status, bike type and other relavent information.
+
+# 3. Data Processing
+
+### **Investigate data integrity**
+
+```{r, include=FALSE}
+fl <- list.files("/Users/les928/Documents/Google_capstone/google bike/", pattern = "2022.*.csv", full.names = T)
+bike_2022 <- lapply(fl, function(x) read.csv(x) %>% mutate(month = gsub(".*(2022)(.*)-div.*","\\2",x))) %>%
+  do.call(rbind, .)
+```
+
+-   Found NAs and 0s in end-latitude and end-longtitude
+
+```{r}
+## found NAs and 0s in end_lat and end_lng
+summary(bike_2022$end_lat)
+summary(bike_2022$end_lng)
+```
+
+-   Found empty entries in column 5,6,7,8 (All station names and IDs)
+
+```{r}
+## column 5,6,7,8 have empty entry (all station number and id)
+unique(which(bike_2022 == "", arr.ind=TRUE)[,2])
+```
+
+-   Found an outliers(i.e. ID 3327172413547F64) where the ride distance is unreasonable
+-   Decide use 10 miles as a filter based on histogram
+
+```{r}
+# Latitude and longitude conversion provided here: https://www.usgs.gov/faqs/how-much-distance-does-a-degree-minute-and-second-cover-your-maps
+
+outlier_d <- bike_2022 %>%
+  select(ride_id, end_lat, end_lng, start_lat, start_lng, member_casual)%>%
+  filter(end_lat != 0,
+         !is.na(end_lat),
+         end_lng != 0,
+         !is.na(end_lng))%>%
+  mutate(distance = sqrt((end_lat*69-start_lat*69)^2+(end_lng*54.6-start_lng*54.6)^2)) %>%
+  arrange(desc(distance))
+
+head(outlier_d)
+```
+
+-   Found reverted start and end time
+-   Found outlier in ride length(Possiblly explained by forgot to return)
+
+```{r}
+outlier_t <- bike_2022 %>%
+  select(ride_id, started_at, ended_at)%>%
+  mutate(ride_length = as.numeric(as.POSIXlt(ended_at)-as.POSIXlt(started_at)))%>%
+  arrange(desc(ride_length))
+
+test <- outlier_t %>%
+  mutate(ride_length = abs(ride_length)/3600)
+
+summary(test$ride_length)
+```
+
+### **Clean data**
+
+### Filter outliers in ride distance
+
+-Based on the histogram, the threshold for ride distance is set to 10 miles
+
+```{r}
+# removed one extreme outlier(801 mile) for better observation
+hist(outlier_d$distance[-1])
+
+td <- outlier_d %>%
+  filter(distance < 10)
+hist(td$distance)
+```
+
+### Filter outliers in ride time
+
+-   Based on histogram, the threshold for ride time is set to 2h
+
+```{r}
+boxplot(test$ride_length)
+
+# removed unreasonable time frame(>12h) for better observation
+test2 <- test %>%
+  filter(ride_length < 12 )
+hist(test2$ride_length)
+
+test3 <- test2 %>%
+  filter(ride_length < 2)
+hist(test3$ride_length)
+```
+
+-   Filter out problematic longitude and latitude data
+-   Apply filters on ride time and ride distance
+
+```{r}
+bike_final <- bike_2022 %>%
+  # remove data with issues
+  filter(end_lat != 0,
+         !is.na(end_lat),
+         end_lng != 0,
+         !is.na(end_lng))%>%
+  mutate(distance = sqrt((end_lat*69-start_lat*69)^2+(end_lng*54.6-start_lng*54.6)^2),
+         weekday = weekdays(as.POSIXlt(started_at)),
+         ride_length = abs(as.numeric(as.POSIXlt(ended_at)-as.POSIXlt(started_at)))/3600)%>%
+  filter(ride_length < 2 & ride_length >0,
+         distance < 10)
+
+head(bike_final)
+#bike_final <- readRDS("/Users/les928/Documents/Google_capstone/new_bike_final.rds")
+```
+
+# 4. Data Analyze
+
+### **Plot1:Casual vs Member across month**
+
+-   Casual rider on average spend more time when riding a bike
+-   Casual rider tend to ride more during the weekend
+
+```{r}
+## to provide correct order when plot weekdays
+week_order <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+plot1 <- bike_final %>%
+  mutate(month = as.numeric(month))%>%
+  group_by(member_casual, month, weekday)%>%
+  summarise(ave_ride_len = mean(ride_length)) %>%
+  ungroup()%>%
+  ggplot(aes(x = factor(weekday, level = week_order), y = ave_ride_len))+
+  geom_bar(aes(fill = member_casual), stat="identity", width=.5, position ="dodge")+
+  facet_wrap(~ month)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("Weekdays")+
+  ylab("Average ride time (hours)")+
+  labs(fill = "membership type")+
+  ggtitle("Average ride time comparasion between member and casual")
+
+print(plot1)
+```
+
+### **plot2: weekly usage summary**
+
+-   Seasonal impact on ride count (winter month less counts)
+-   Annual member rides more during weekdays
+-   Casual member rides more during weekends (less difference observed during weekdays)
+
+```{r}
+plot2 <- bike_final %>%
+  mutate(month = as.numeric(month))%>%
+  group_by(month, member_casual, weekday) %>%
+  summarise(count = n())%>%
+  ungroup()%>%
+  ggplot(aes(x = factor(weekday, level = week_order), y = count))+
+  geom_bar(aes(fill = member_casual), stat="identity", width=.5, position ="dodge")+
+  facet_wrap(~month)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("Weekdays")+
+  ylab("Average ride counts")+
+  labs(fill = "membership type")+
+  ggtitle("Average ride counts comparasion between member and casual")
+
+print(plot2)
+```
+
+### **plot3: map distance between member and casual**
+
+-   Ride distance is very similar between member and casual
+-   Ride distance is less affected by seasonal factors and days within a week
+
+```{r}
+plot3 <- bike_final %>%
+  mutate(month = as.numeric(month))%>%
+  group_by(month, member_casual, weekday) %>%
+  summarise(ave_dist = mean(distance))%>%
+  ungroup()%>%
+  ggplot(aes(x = factor(weekday, level = week_order), y = ave_dist))+
+  geom_bar(aes(fill = member_casual), stat="identity", width=.5, position ="dodge")+
+  facet_wrap(~month)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("Weekdays")+
+  ylab("Average ride distance (miles)")+
+  labs(fill = "membership type")+
+  ggtitle("Average ride distance comparasion between member and casual")
+
+print(plot3)
+```
+
+### **plot4: Ride time vs. ride count**
+
+```{r}
+plot4 <- bike_final %>%
+  mutate(month = as.numeric(month))%>%
+  group_by(member_casual, month, weekday)%>%
+  summarise(`Average Ride Time (hour)` = mean(ride_length),
+            count = n())%>%
+  ungroup()%>%
+  gather(key = xaxis, value = yaxis, 4:5)%>%
+  ggplot(aes(x = member_casual, y = yaxis))+
+  geom_violin(aes(fill = member_casual), show.legend = FALSE)+
+  facet_wrap(~xaxis, scales = "free")+
+  xlab("")+
+  ylab("")
+
+print(plot4)
+```
+
+### **plot5: ride count for bike type**
+
+```{r}
+bike_final$weekday <- factor(bike_final$weekday, levels = week_order)
+plot5 <- bike_final %>%
+  ggplot(aes(x = rideable_type, fill = member_casual))+
+  geom_bar(stat = "count", position = "dodge") +
+  facet_wrap(~weekday)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+print(plot5)
+```
+
+## Discussion
+
+In plot 1, members' average ride-time is always shorter than the casual member. Considering the similar riding distance as shown in plot 3, members on average ride faster than the casual riders. This may infer that most members use Cyclyist for work commute and casual riders mainly use cyclist for leisure purpose. From plot 3, we see a very similar distribution of riding distance between casual rider and members, indicating the commute length is not a primary factor for annual subscription. There is also seasonal bias for average riding time. The average riding time for casual rider is longer when the weather is warmer which is between March and September. This evidence reinforce the fact that members and casual rider use cyclist for different purpose. In plot 2, we also see seasonal bias for both group, but this plot doesn't refute the previous statement because significantly more members rides cyclist during winter. Another observation is that casual member tend to ride more cyclist during the weekend compared to members. These interpretation is not comprehensive due to the limited data and should only be used as a reference. In plot 5, we see a slight increase in electric bike usage compared to normal bike in casual users and no significantly difference between two type of bikes for annual members.
+
+## Summary
+
+-   Casual riders tend to ride more during the weekend compared to weekdays.
+-   Annual members use cyclistic constantly during the week
+-   Casual riders ride time is longer than annual members
+-   Casual riders use it for leisure and casual use it for daily commute
+-   Annual members don't seem to have a preference between electric and normal bikes, but casual riders ride more electric bikes
+
+# Proposal
+
+-   Weekend points system: Casual member tend to ride more during the weekend, and members ride less during the weekend, having weekend benefit will encourage casual members to become members and annual members to ride more during the weekend
+-   Provide more bikes around the working and living area since most annual members use cyclistic for daily commute
+-   Collaborate with local franchise to allow member user to redeem their points for gift-cards or other rewards.
